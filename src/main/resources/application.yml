@@ -1,0 +1,8 @@
+telegrambots:
+  bot-username: CartMasterProBot
+  bot-token: ${BOT_TOKEN}
+  bot-path: /webhook
+  webhook-secret: ${WEBHOOK_SECRET}
+
+server:
+  port: ${SERVER_PORT:8081}
