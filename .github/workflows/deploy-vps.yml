@@ -1,0 +1,107 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cartmasterprobot-production
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source code
+        uses: actions/checkout@v5
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Build and test
+        run: mvn --batch-mode clean package
+
+  deploy:
+    needs: verify
+    runs-on: ubuntu-latest
+    env:
+      VPS_HOST: ${{ vars.VPS_HOST }}
+      VPS_PORT: ${{ vars.VPS_PORT }}
+      VPS_USER: ${{ vars.VPS_USER }}
+      APP_DIR: ${{ vars.APP_DIR }}
+      SYSTEMD_SERVICE: ${{ vars.SYSTEMD_SERVICE }}
+      VPS_KNOWN_HOSTS: ${{ vars.VPS_KNOWN_HOSTS }}
+      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+
+    steps:
+      - name: Validate deployment settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=(
+            VPS_HOST
+            VPS_PORT
+            VPS_USER
+            APP_DIR
+            SYSTEMD_SERVICE
+            VPS_KNOWN_HOSTS
+            VPS_SSH_KEY
+          )
+          for variable_name in "${required[@]}"; do
+            if [ -z "${!variable_name}" ]; then
+              echo "Missing GitHub Actions setting: ${variable_name}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Configure SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$VPS_SSH_KEY" > "$HOME/.ssh/deploy_key"
+          chmod 600 "$HOME/.ssh/deploy_key"
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+      - name: Update source code and restart the service
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh_options=(
+            -i "$HOME/.ssh/deploy_key"
+            -p "$VPS_PORT"
+            -o BatchMode=yes
+            -o StrictHostKeyChecking=yes
+          )
+
+          ssh "${ssh_options[@]}" "$VPS_USER@$VPS_HOST" \
+            bash -s -- "$APP_DIR" "$SYSTEMD_SERVICE" <<'REMOTE_SCRIPT'
+          set -euo pipefail
+          app_dir="$1"
+          service_name="$2"
+
+          case "$app_dir" in
+            /*) ;;
+            *) echo "APP_DIR must be an absolute path" >&2; exit 1 ;;
+          esac
+          case "$service_name" in
+            *[!A-Za-z0-9@._-]*|'') echo "Invalid systemd service name" >&2; exit 1 ;;
+          esac
+
+          cd "$app_dir"
+          git pull --ff-only
+          mvn clean package
+          sudo /usr/bin/systemctl restart "$service_name"
+          sudo /usr/bin/systemctl is-active --quiet "$service_name"
+          REMOTE_SCRIPT

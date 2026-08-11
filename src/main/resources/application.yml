@@ -5,4 +5,5 @@ telegrambots:
   webhook-secret: ${WEBHOOK_SECRET}
 
 server:
+  address: ${SERVER_ADDRESS:127.0.0.1}
   port: ${SERVER_PORT:8081}

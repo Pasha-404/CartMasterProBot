@@ -2,38 +2,59 @@ package org.cartmaster.controller;
 
 import org.cartmaster.bot.CartMasterProBot;
 import org.cartmaster.config.BotConfig;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.web.bind.annotation.*;
+import org.cartmaster.service.ProcessedUpdateService;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RestController;
 import org.telegram.telegrambots.meta.api.methods.BotApiMethod;
 import org.telegram.telegrambots.meta.api.objects.Update;
 
-import java.util.Objects;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 
 @RestController
 public class WebhookController {
 
+    private static final String SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token";
+
     private final CartMasterProBot bot;
     private final BotConfig config;
+    private final ProcessedUpdateService processedUpdateService;
 
-    @Autowired
-    public WebhookController(CartMasterProBot bot, BotConfig config) {
+    public WebhookController(
+            CartMasterProBot bot,
+            BotConfig config,
+            ProcessedUpdateService processedUpdateService
+    ) {
         this.bot = bot;
         this.config = config;
+        this.processedUpdateService = processedUpdateService;
     }
 
     @PostMapping("${telegrambots.bot-path}")
-    public BotApiMethod<?> onUpdateReceived(
+    public ResponseEntity<BotApiMethod<?>> onUpdateReceived(
             @RequestBody Update update,
-            @RequestHeader(value = "X-Telegram-Bot-Api-Secret-Token", required = false) String secretHeader
+            @RequestHeader(value = SECRET_HEADER, required = false) String secretHeader
     ) {
-        // Если секрет в конфиге задан — строго проверяем заголовок;
-        // если не задан — пропускаем (обратная совместимость).
-        String expected = config.getWebhookSecret();
-        if (expected != null && !expected.isBlank() && !Objects.equals(secretHeader, expected)) {
-            // Чужой запрос — игнорируем (вернём 200 OK без тела).
-            return null;
+        if (!hasValidSecret(secretHeader)) {
+            return ResponseEntity.ok().build();
+        }
+        if (update == null || !processedUpdateService.markIfNew(update.getUpdateId())) {
+            return ResponseEntity.ok().build();
         }
 
-        return bot.onWebhookUpdateReceived(update);
+        return ResponseEntity.ok(bot.onWebhookUpdateReceived(update));
+    }
+
+    private boolean hasValidSecret(String providedSecret) {
+        if (providedSecret == null) {
+            return false;
+        }
+
+        byte[] expected = config.getWebhookSecret().getBytes(StandardCharsets.UTF_8);
+        byte[] provided = providedSecret.getBytes(StandardCharsets.UTF_8);
+        return MessageDigest.isEqual(expected, provided);
     }
 }
