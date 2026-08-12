@@ -102,6 +102,6 @@ jobs:
           cd "$app_dir"
           git pull --ff-only
           mvn clean package
-          sudo /usr/bin/systemctl restart "$service_name"
-          sudo /usr/bin/systemctl is-active --quiet "$service_name"
+          sudo -n /usr/bin/systemctl restart "$service_name"
+          /usr/bin/systemctl is-active --quiet "$service_name"
           REMOTE_SCRIPT
