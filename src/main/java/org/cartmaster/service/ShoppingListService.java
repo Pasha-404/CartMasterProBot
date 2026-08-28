@@ -56,6 +56,14 @@ public class ShoppingListService {
     }
 
     public boolean moveToBought(long chatId, String productId) {
+        return moveToBought(chatId, productId, false);
+    }
+
+    public boolean moveToBoughtAndResetWhenCompleted(long chatId, String productId) {
+        return moveToBought(chatId, productId, true);
+    }
+
+    private boolean moveToBought(long chatId, String productId, boolean resetWhenCompleted) {
         if (productId == null || productId.isBlank()) {
             return false;
         }
@@ -63,6 +71,9 @@ public class ShoppingListService {
         AtomicBoolean moved = new AtomicBoolean(false);
         listsByChat.computeIfPresent(chatId, (ignored, lists) -> {
             moved.set(lists.moveToBought(productId));
+            if (moved.get() && resetWhenCompleted && lists.hasNoProductsToBuy()) {
+                return new UserLists();
+            }
             return lists;
         });
         return moved.get();
@@ -79,7 +90,7 @@ public class ShoppingListService {
         }
 
         List<String> names = new ArrayList<>();
-        for (String item : input.split("(?:\\R|,)")) {
+        for (String item : input.split("(?:\\R|,(?!\\d)|(?<!\\d),)")) {
             String name = item.strip();
             if (!name.isEmpty()) {
                 names.add(name);
@@ -143,6 +154,10 @@ public class ShoppingListService {
                 }
             }
             return false;
+        }
+
+        private synchronized boolean hasNoProductsToBuy() {
+            return toBuy.isEmpty();
         }
 
         private synchronized ShoppingListSnapshot snapshot() {

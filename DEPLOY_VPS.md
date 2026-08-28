@@ -1,78 +1,92 @@
-# Автодеплой на VPS через GitHub Actions
+# Автодеплой на VPS
 
-Каждый push в `master` запускает workflow [deploy-vps.yml](.github/workflows/deploy-vps.yml):
+Каждый push в `master` запускает [.github/workflows/deploy-vps.yml](.github/workflows/deploy-vps.yml). Workflow сначала запускает `mvn clean package` в GitHub Actions, затем по SSH выполняет на VPS:
 
-1. GitHub Actions выполняет `mvn clean package` с Java 17.
-2. После успешной сборки подключается к VPS по SSH.
-3. На VPS выполняет `git pull --ff-only`, затем `mvn clean package`.
-4. Перезапускает systemd-сервис и проверяет его состояние `active`.
+```bash
+git pull --ff-only
+mvn clean package
+sudo -n /usr/bin/systemctl restart cartmasterprobot.service
+/usr/bin/systemctl is-active --quiet cartmasterprobot.service
+```
 
-Webhook, Nginx и env-файл с секретами во время обычного деплоя не меняются.
+Последняя команда не требует sudo. Если сервис не запустится, workflow завершится с ошибкой.
 
-## Настройки GitHub
+Webhook, Nginx и файл переменных окружения приложения при обычном деплое не меняются.
 
-Открыть в репозитории `Settings` → `Secrets and variables` → `Actions`.
+## Подтверждённая конфигурация VPS
 
-Создать secret:
+| Параметр | Значение |
+| --- | --- |
+| Каталог приложения | `/opt/apps/cartmasterprobot` |
+| SSH-пользователь GitHub Actions | `cartmaster-deploy` |
+| Группа доступа к каталогу | `cartmaster` |
+| Пользователь systemd-сервиса | `pavel` |
+| Имя сервиса | `cartmasterprobot.service` |
+| Запускаемый JAR | `/opt/apps/cartmasterprobot/target/CartMasterProBot-1.0.0.jar` |
+
+Пользователи `pavel` и `cartmaster-deploy` входят в группу `cartmaster`; каталог приложения доступен им на запись. Для Git на сервере задано:
+
+```bash
+git config --global --add safe.directory /opt/apps/cartmasterprobot
+```
+
+От имени `cartmaster-deploy` проверены `git pull --ff-only` и `mvn clean package`.
+
+## GitHub Actions: секрет и переменные
+
+В репозитории открыть `Settings` → `Secrets and variables` → `Actions`.
+
+Secret:
 
 | Имя | Содержимое |
 | --- | --- |
-| `VPS_SSH_KEY` | Приватный SSH-ключ пользователя, который выполняет деплой. |
+| `VPS_SSH_KEY` | Приватный SSH-ключ пользователя `cartmaster-deploy`. |
 
-Создать variables:
+Variables:
 
-| Имя | Содержимое |
+| Имя | Значение |
 | --- | --- |
 | `VPS_HOST` | IP-адрес или DNS-имя VPS. |
-| `VPS_PORT` | SSH-порт, обычно `22`. |
-| `VPS_USER` | SSH-пользователь для деплоя. |
-| `APP_DIR` | Абсолютный путь к Git-репозиторию бота на VPS. |
-| `SYSTEMD_SERVICE` | Имя systemd-сервиса, например `cartmasterprobot`. |
-| `VPS_KNOWN_HOSTS` | Host key VPS в формате `known_hosts`; для нестандартного порта — `[host]:port ключ`. |
+| `VPS_PORT` | SSH-порт VPS. |
+| `VPS_USER` | `cartmaster-deploy` |
+| `APP_DIR` | `/opt/apps/cartmasterprobot` |
+| `SYSTEMD_SERVICE` | `cartmasterprobot.service` |
+| `VPS_KNOWN_HOSTS` | Проверенная запись VPS в формате `known_hosts`; для нестандартного порта — `[host]:port ключ`. |
 
-Не добавлять в GitHub `BOT_TOKEN`, `WEBHOOK_SECRET` или содержимое server env-файла. Они остаются только на VPS.
+Workflow использует `StrictHostKeyChecking=yes` и не вызывает `ssh-keyscan`. Значение `VPS_KNOWN_HOSTS` нужно получить из доверенного источника и сверить с отпечатком VPS.
 
-`VPS_KNOWN_HOSTS` нужно получить из доверенного источника и сверить с отпечатком сервера. Workflow использует `StrictHostKeyChecking=yes` и не вызывает `ssh-keyscan`.
+Не добавлять в GitHub, репозиторий или логи `BOT_TOKEN`, `WEBHOOK_SECRET` и содержимое файла переменных окружения приложения. Эти секреты остаются только на VPS.
 
-## Требования к VPS
+## Ограниченные права sudo
 
-На сервере уже должен быть клон этого репозитория в `APP_DIR`. SSH-пользователь должен иметь права выполнять в нём `git pull --ff-only` и `mvn clean package`.
-
-Для `git pull` серверу нужен собственный доступ на чтение GitHub: deploy key, GitHub App или сохранённая авторизация. Этот доступ настраивается на VPS, а не в GitHub Actions.
-
-Systemd-сервис должен запускать JAR из рабочей копии репозитория, например:
-
-```ini
-[Service]
-WorkingDirectory=/opt/apps/cartmasterprobot
-EnvironmentFile=/etc/cartmasterprobot/cartmasterprobot.env
-ExecStart=/usr/bin/java -jar /opt/apps/cartmasterprobot/target/CartMasterProBot-1.0.0.jar
-Restart=on-failure
-```
-
-SSH-пользователю нужны ограниченные права sudo только на этот сервис:
+У `cartmaster-deploy` нет обычного sudo. Ему разрешён только перезапуск конкретного сервиса без пароля:
 
 ```sudoers
-deploybot ALL=(root) NOPASSWD: /usr/bin/systemctl restart cartmasterprobot, /usr/bin/systemctl is-active cartmasterprobot
+cartmaster-deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart cartmasterprobot.service
 ```
 
-Подставить фактические имя пользователя и сервиса.
+Проверка `systemctl is-active` выполняется без sudo, поэтому расширять это разрешение не нужно.
 
-На VPS должны быть доступны Java 17 и Maven в `PATH` неинтерактивного SSH-сеанса. Команда проверки:
+## Обычный деплой
+
+1. Выполнить изменения и проверить их локально.
+2. Закоммитить и отправить их в `master`.
+3. Открыть вкладку `Actions` и дождаться успешного workflow `Deploy to VPS`.
+
+Успешный workflow означает, что тесты прошли, новый JAR собран на VPS, сервис перезапущен и находится в состоянии `active`.
+
+## Диагностика
+
+На VPS:
 
 ```bash
-java -version
-mvn -version
-```
-
-## Проверка и откат
-
-После первого push проверить результат во вкладке `Actions`, затем на VPS:
-
-```bash
-sudo systemctl status cartmasterprobot
-sudo journalctl -u cartmasterprobot -n 100 --no-pager
+sudo systemctl status cartmasterprobot.service --no-pager
+sudo journalctl -u cartmasterprobot.service -n 100 --no-pager
 git -C /opt/apps/cartmasterprobot log -1 --oneline
 ```
 
-`git pull --ff-only` специально не создаёт merge-коммиты. Если нужен откат, на VPS нужно переключить рабочую копию на предыдущий проверенный коммит, собрать JAR и перезапустить сервис. Автоматический откат workflow не делает.
+В GitHub Actions раскрыть шаг `Update source code and restart the service`: его последние строки показывают точную команду, на которой остановился деплой.
+
+## Откат
+
+Автоматического отката нет. Для ручного отката на VPS нужно переключить рабочую копию на предыдущий проверенный коммит, собрать JAR и перезапустить сервис. После ручного отката не выполнять новый push в `master`, пока причина проблемы не устранена: иначе workflow снова применит текущую версию.

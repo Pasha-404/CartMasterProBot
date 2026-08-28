@@ -29,6 +29,15 @@ class ShoppingListServiceTest {
     }
 
     @Test
+    void keepsDecimalCommasInProductNames() {
+        service.addProducts(1L, "Молоко 3,2%, хлеб");
+
+        assertThat(service.getSnapshot(1L).toBuy())
+                .extracting(ShoppingListService.ShoppingListItem::name)
+                .containsExactlyInAnyOrder("Молоко 3,2%", "хлеб");
+    }
+
+    @Test
     void usesUniqueIdsAndMakesRepeatedCallbackIdempotent() {
         service.addProducts(1L, "Молоко, Молоко");
         List<ShoppingListService.ShoppingListItem> items = service.getSnapshot(1L).toBuy();
@@ -49,6 +58,22 @@ class ShoppingListServiceTest {
         service.moveToBought(1L, itemId);
 
         service.reset(1L);
+
+        assertThat(service.getSnapshot(1L).toBuy()).isEmpty();
+        assertThat(service.getSnapshot(1L).bought()).isEmpty();
+    }
+
+    @Test
+    void startsNewListWhenTheLastProductIsBought() {
+        service.addProducts(1L, "Молоко, Хлеб");
+        String firstProductId = service.getSnapshot(1L).toBuy().get(0).id();
+
+        assertThat(service.moveToBoughtAndResetWhenCompleted(1L, firstProductId)).isTrue();
+        assertThat(service.getSnapshot(1L).toBuy()).hasSize(1);
+        assertThat(service.getSnapshot(1L).bought()).hasSize(1);
+
+        String lastProductId = service.getSnapshot(1L).toBuy().get(0).id();
+        assertThat(service.moveToBoughtAndResetWhenCompleted(1L, lastProductId)).isTrue();
 
         assertThat(service.getSnapshot(1L).toBuy()).isEmpty();
         assertThat(service.getSnapshot(1L).bought()).isEmpty();

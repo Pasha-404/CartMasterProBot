@@ -36,11 +36,17 @@ public class CartMasterProBot extends TelegramWebhookBot {
 
     private final BotConfig config;
     private final ShoppingListService shoppingListService;
+    private final ProductIconResolver productIconResolver;
 
-    public CartMasterProBot(BotConfig config, ShoppingListService shoppingListService) {
+    public CartMasterProBot(
+            BotConfig config,
+            ShoppingListService shoppingListService,
+            ProductIconResolver productIconResolver
+    ) {
         super(config.getBotToken());
         this.config = config;
         this.shoppingListService = shoppingListService;
+        this.productIconResolver = productIconResolver;
     }
 
     @Override
@@ -127,7 +133,7 @@ public class CartMasterProBot extends TelegramWebhookBot {
             return;
         }
 
-        if (shoppingListService.moveToBought(chatId, callbackData)) {
+        if (shoppingListService.moveToBoughtAndResetWhenCompleted(chatId, callbackData)) {
             editShoppingListMessage(createShoppingListEdit(chatId, callbackMessage.getMessageId()));
         }
     }
@@ -169,7 +175,7 @@ public class CartMasterProBot extends TelegramWebhookBot {
         } else {
             for (ShoppingListItem product : snapshot.bought()) {
                 text.append("✔️ ")
-                        .append(escapeHtml(truncateProductName(product.name())))
+                        .append(escapeHtml(formatProductName(product.name())))
                         .append('\n');
             }
         }
@@ -181,7 +187,7 @@ public class CartMasterProBot extends TelegramWebhookBot {
 
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         for (ShoppingListItem product : snapshot.toBuy()) {
-            InlineKeyboardButton button = new InlineKeyboardButton(truncateProductName(product.name()));
+            InlineKeyboardButton button = new InlineKeyboardButton(formatProductName(product.name()));
             button.setCallbackData(product.id());
             rows.add(Collections.singletonList(button));
         }
@@ -227,6 +233,10 @@ public class CartMasterProBot extends TelegramWebhookBot {
         return name.length() > MAX_PRODUCT_DISPLAY_LENGTH
                 ? name.substring(0, MAX_PRODUCT_DISPLAY_LENGTH) + "…"
                 : name;
+    }
+
+    private String formatProductName(String name) {
+        return productIconResolver.decorate(truncateProductName(name));
     }
 
     private String escapeHtml(String value) {

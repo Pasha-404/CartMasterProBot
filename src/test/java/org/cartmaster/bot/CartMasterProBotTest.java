@@ -11,6 +11,7 @@ import org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageTe
 import org.telegram.telegrambots.meta.api.objects.CallbackQuery;
 import org.telegram.telegrambots.meta.api.objects.Message;
 import org.telegram.telegrambots.meta.api.objects.Update;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
 
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -35,7 +36,7 @@ class CartMasterProBotTest {
         config.setBotPath("/webhook");
         config.setWebhookSecret("test-secret");
         shoppingListService = new ShoppingListService();
-        bot = new CartMasterProBot(config, shoppingListService);
+        bot = new CartMasterProBot(config, shoppingListService, new ProductIconResolver());
     }
 
     @Test
@@ -66,7 +67,7 @@ class CartMasterProBotTest {
     }
 
     @Test
-    void answersCallbackAndEditsTheExistingShoppingListMessage() {
+    void answersCallbackAndStartsNewListAfterTheLastProduct() {
         shoppingListService.addProducts(1L, "Молоко");
         String productId = shoppingListService.getSnapshot(1L).toBuy().get(0).id();
         CartMasterProBot callbackBot = spy(bot);
@@ -90,8 +91,24 @@ class CartMasterProBotTest {
         assertThat(response).isInstanceOf(AnswerCallbackQuery.class);
         assertThat(((AnswerCallbackQuery) response).getCallbackQueryId()).isEqualTo("callback-id");
         assertThat(shoppingListService.getSnapshot(1L).toBuy()).isEmpty();
-        assertThat(shoppingListService.getSnapshot(1L).bought()).hasSize(1);
+        assertThat(shoppingListService.getSnapshot(1L).bought()).isEmpty();
         org.mockito.Mockito.verify(callbackBot).editShoppingListMessage(any(EditMessageText.class));
+    }
+
+    @Test
+    void addsProductIconsWithoutChangingTheOriginalProductName() {
+        BotApiMethod<?> response = bot.onWebhookUpdateReceived(textUpdate(1L, "МОЛОКО 3,2%, неизвестный товар"));
+
+        assertThat(response).isInstanceOf(SendMessage.class);
+        SendMessage message = (SendMessage) response;
+        InlineKeyboardMarkup keyboard = (InlineKeyboardMarkup) message.getReplyMarkup();
+        assertThat(keyboard.getKeyboard())
+                .flatExtracting(row -> row)
+                .extracting(button -> button.getText())
+                .contains("🥛 МОЛОКО 3,2%", "неизвестный товар");
+        assertThat(shoppingListService.getSnapshot(1L).toBuy())
+                .extracting(ShoppingListService.ShoppingListItem::name)
+                .containsExactlyInAnyOrder("МОЛОКО 3,2%", "неизвестный товар");
     }
 
     @Test
