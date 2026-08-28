@@ -9,8 +9,6 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 
 @Service
 public class ShoppingListService {
@@ -18,10 +16,10 @@ public class ShoppingListService {
     public static final int MAX_PRODUCT_NAME_LENGTH = 30;
     public static final int MAX_PRODUCTS_PER_LIST = 20;
 
-    private final ConcurrentMap<Long, UserLists> listsByChat = new ConcurrentHashMap<>();
+    private final ConcurrentMap<Long, ChatLists> listsByChat = new ConcurrentHashMap<>();
 
     public void reset(long chatId) {
-        listsByChat.put(chatId, new UserLists());
+        listsByChat.put(chatId, new ChatLists());
     }
 
     public AddProductsResult addProducts(long chatId, String input) {
@@ -36,52 +34,42 @@ public class ShoppingListService {
             }
         }
 
-        if (acceptedNames.isEmpty()) {
-            return new AddProductsResult(0, rejectedTooLong, 0);
-        }
-
-        int rejectedTooLongCount = rejectedTooLong;
-        AtomicReference<AddProductsResult> result = new AtomicReference<>();
-        listsByChat.compute(chatId, (ignored, currentLists) -> {
-            UserLists lists = currentLists == null ? new UserLists() : currentLists;
-            int addedProducts = lists.addProducts(acceptedNames);
-            result.set(new AddProductsResult(
-                    addedProducts,
-                    rejectedTooLongCount,
-                    acceptedNames.size() - addedProducts
-            ));
-            return lists;
-        });
-        return result.get();
+        ChatLists lists = getChatLists(chatId);
+        return lists.addProducts(acceptedNames, rejectedTooLong);
     }
 
     public boolean moveToBought(long chatId, String productId) {
-        return moveToBought(chatId, productId, false);
+        ChatLists lists = listsByChat.get(chatId);
+        return lists != null && lists.moveToBought(productId);
     }
 
-    public boolean moveToBoughtAndResetWhenCompleted(long chatId, String productId) {
-        return moveToBought(chatId, productId, true);
+    public MoveToBoughtResult moveToBought(long chatId, int messageId, String productId) {
+        ChatLists lists = listsByChat.get(chatId);
+        return lists == null
+                ? MoveToBoughtResult.notMoved()
+                : lists.moveToBought(messageId, productId);
     }
 
-    private boolean moveToBought(long chatId, String productId, boolean resetWhenCompleted) {
-        if (productId == null || productId.isBlank()) {
-            return false;
-        }
+    public ListTransition startNewList(long chatId, int messageId) {
+        return getChatLists(chatId).startNewList(messageId);
+    }
 
-        AtomicBoolean moved = new AtomicBoolean(false);
-        listsByChat.computeIfPresent(chatId, (ignored, lists) -> {
-            moved.set(lists.moveToBought(productId));
-            if (moved.get() && resetWhenCompleted && lists.hasNoProductsToBuy()) {
-                return new UserLists();
-            }
-            return lists;
-        });
-        return moved.get();
+    public ActiveListSnapshot getActiveList(long chatId) {
+        return getChatLists(chatId).snapshot();
+    }
+
+    public ActiveListSnapshot registerActiveMessage(long chatId, String listId, int messageId) {
+        ChatLists lists = listsByChat.get(chatId);
+        return lists == null ? null : lists.registerMessage(listId, messageId);
     }
 
     public ShoppingListSnapshot getSnapshot(long chatId) {
-        UserLists lists = listsByChat.get(chatId);
-        return lists == null ? ShoppingListSnapshot.empty() : lists.snapshot();
+        ChatLists lists = listsByChat.get(chatId);
+        return lists == null ? ShoppingListSnapshot.empty() : lists.snapshot().snapshot();
+    }
+
+    private ChatLists getChatLists(long chatId) {
+        return listsByChat.computeIfAbsent(chatId, ignored -> new ChatLists());
     }
 
     private static List<String> parseProductNames(String input) {
@@ -129,11 +117,104 @@ public class ShoppingListService {
         }
     }
 
+    public record ActiveListSnapshot(
+            String listId,
+            Integer messageId,
+            ShoppingListSnapshot snapshot
+    ) {
+    }
+
+    public record ListTransition(
+            int previousMessageId,
+            ShoppingListSnapshot previousSnapshot,
+            String newListId
+    ) {
+    }
+
+    public record MoveToBoughtResult(
+            boolean moved,
+            ShoppingListSnapshot snapshot,
+            ListTransition transition
+    ) {
+        private static MoveToBoughtResult notMoved() {
+            return new MoveToBoughtResult(false, ShoppingListSnapshot.empty(), null);
+        }
+
+        public boolean startsNewList() {
+            return transition != null;
+        }
+    }
+
+    private static final class ChatLists {
+        private String activeListId = createListId();
+        private UserLists activeLists = new UserLists();
+        private Integer activeMessageId;
+
+        private synchronized AddProductsResult addProducts(List<String> names, int rejectedTooLong) {
+            int addedProducts = activeLists.addProducts(names);
+            return new AddProductsResult(addedProducts, rejectedTooLong, names.size() - addedProducts);
+        }
+
+        private synchronized boolean moveToBought(String productId) {
+            return activeLists.moveToBought(productId);
+        }
+
+        private synchronized MoveToBoughtResult moveToBought(int messageId, String productId) {
+            if (!isActiveMessage(messageId) || !activeLists.moveToBought(productId)) {
+                return MoveToBoughtResult.notMoved();
+            }
+
+            ShoppingListSnapshot snapshot = activeLists.snapshot();
+            if (!snapshot.toBuy().isEmpty()) {
+                return new MoveToBoughtResult(true, snapshot, null);
+            }
+
+            ListTransition transition = startNewList();
+            return new MoveToBoughtResult(true, snapshot, transition);
+        }
+
+        private synchronized ListTransition startNewList(int messageId) {
+            return isActiveMessage(messageId) ? startNewList() : null;
+        }
+
+        private ListTransition startNewList() {
+            ListTransition transition = new ListTransition(
+                    activeMessageId,
+                    activeLists.snapshot(),
+                    createListId()
+            );
+            activeListId = transition.newListId();
+            activeLists = new UserLists();
+            activeMessageId = null;
+            return transition;
+        }
+
+        private synchronized ActiveListSnapshot snapshot() {
+            return new ActiveListSnapshot(activeListId, activeMessageId, activeLists.snapshot());
+        }
+
+        private synchronized ActiveListSnapshot registerMessage(String listId, int messageId) {
+            if (!activeListId.equals(listId) || activeMessageId != null) {
+                return null;
+            }
+            activeMessageId = messageId;
+            return snapshot();
+        }
+
+        private boolean isActiveMessage(int messageId) {
+            return activeMessageId != null && activeMessageId == messageId;
+        }
+
+        private static String createListId() {
+            return UUID.randomUUID().toString();
+        }
+    }
+
     private static final class UserLists {
         private final List<ShoppingListItem> toBuy = new ArrayList<>();
         private final List<ShoppingListItem> bought = new ArrayList<>();
 
-        private synchronized int addProducts(List<String> names) {
+        private int addProducts(List<String> names) {
             int availableSlots = MAX_PRODUCTS_PER_LIST - toBuy.size() - bought.size();
             int productsToAdd = Math.max(0, Math.min(availableSlots, names.size()));
             names.stream()
@@ -143,7 +224,11 @@ public class ShoppingListService {
             return productsToAdd;
         }
 
-        private synchronized boolean moveToBought(String productId) {
+        private boolean moveToBought(String productId) {
+            if (productId == null || productId.isBlank()) {
+                return false;
+            }
+
             Iterator<ShoppingListItem> iterator = toBuy.iterator();
             while (iterator.hasNext()) {
                 ShoppingListItem item = iterator.next();
@@ -156,11 +241,7 @@ public class ShoppingListService {
             return false;
         }
 
-        private synchronized boolean hasNoProductsToBuy() {
-            return toBuy.isEmpty();
-        }
-
-        private synchronized ShoppingListSnapshot snapshot() {
+        private ShoppingListSnapshot snapshot() {
             List<ShoppingListItem> sortedToBuy = new ArrayList<>(toBuy);
             sortedToBuy.sort(Comparator.comparing(
                     ShoppingListItem::name,

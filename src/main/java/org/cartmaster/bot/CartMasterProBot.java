@@ -2,7 +2,10 @@ package org.cartmaster.bot;
 
 import org.cartmaster.config.BotConfig;
 import org.cartmaster.service.ShoppingListService;
+import org.cartmaster.service.ShoppingListService.ActiveListSnapshot;
 import org.cartmaster.service.ShoppingListService.AddProductsResult;
+import org.cartmaster.service.ShoppingListService.ListTransition;
+import org.cartmaster.service.ShoppingListService.MoveToBoughtResult;
 import org.cartmaster.service.ShoppingListService.ShoppingListItem;
 import org.cartmaster.service.ShoppingListService.ShoppingListSnapshot;
 import org.slf4j.Logger;
@@ -23,6 +26,8 @@ import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 @Component
 public class CartMasterProBot extends TelegramWebhookBot {
@@ -30,13 +35,14 @@ public class CartMasterProBot extends TelegramWebhookBot {
     private static final Logger LOGGER = LoggerFactory.getLogger(CartMasterProBot.class);
 
     private static final int MAX_PRODUCT_DISPLAY_LENGTH = 30;
-    private static final String CLEAR_CALLBACK = "/clear";
+    private static final String NEW_LIST_CALLBACK = "/new";
     private static final String RESET_MESSAGE = "🗂️ Новый список создан. Начнём заново!";
     private static final String ERROR_MESSAGE = "⚠️ Произошла ошибка, попробуйте ещё раз";
 
     private final BotConfig config;
     private final ShoppingListService shoppingListService;
     private final ProductIconResolver productIconResolver;
+    private final ConcurrentMap<ListMessageKey, Boolean> pendingListMessages = new ConcurrentHashMap<>();
 
     public CartMasterProBot(
             BotConfig config,
@@ -72,14 +78,15 @@ public class CartMasterProBot extends TelegramWebhookBot {
         return null;
     }
 
-    private SendMessage handleTextMessage(long chatId, String text) {
+    private BotApiMethod<?> handleTextMessage(long chatId, String text) {
         String normalizedText = text == null ? "" : text.strip();
         if (normalizedText.startsWith("/")) {
             return handleCommand(chatId, normalizedText);
         }
 
         AddProductsResult result = shoppingListService.addProducts(chatId, normalizedText);
-        return showShoppingList(chatId, buildAddProductsNotice(result));
+        refreshActiveList(chatId, buildAddProductsNotice(result));
+        return null;
     }
 
     private SendMessage handleCommand(long chatId, String commandLine) {
@@ -114,60 +121,105 @@ public class CartMasterProBot extends TelegramWebhookBot {
         if (callbackMessage != null
                 && callbackMessage.getChatId() != null
                 && callbackMessage.getMessageId() != null) {
-            updateListAfterCallback(callbackQuery, callbackMessage);
+            updateListAfterCallback(
+                    callbackMessage.getChatId(),
+                    callbackMessage.getMessageId(),
+                    callbackQuery.getData()
+            );
         }
 
         String callbackId = callbackQuery.getId();
         return callbackId == null || callbackId.isBlank() ? null : new AnswerCallbackQuery(callbackId);
     }
 
-    private void updateListAfterCallback(
-            CallbackQuery callbackQuery,
-            MaybeInaccessibleMessage callbackMessage
-    ) {
-        long chatId = callbackMessage.getChatId();
-        String callbackData = callbackQuery.getData();
-        if (CLEAR_CALLBACK.equals(callbackData)) {
-            shoppingListService.reset(chatId);
-            editShoppingListMessage(createShoppingListEdit(chatId, callbackMessage.getMessageId()));
+    private void updateListAfterCallback(long chatId, int messageId, String callbackData) {
+        if (NEW_LIST_CALLBACK.equals(callbackData)) {
+            ListTransition transition = shoppingListService.startNewList(chatId, messageId);
+            if (transition != null) {
+                finalizeListAndOpenNew(chatId, transition);
+            }
             return;
         }
 
-        if (shoppingListService.moveToBoughtAndResetWhenCompleted(chatId, callbackData)) {
-            editShoppingListMessage(createShoppingListEdit(chatId, callbackMessage.getMessageId()));
+        MoveToBoughtResult result = shoppingListService.moveToBought(chatId, messageId, callbackData);
+        if (!result.moved()) {
+            return;
+        }
+        if (result.startsNewList()) {
+            finalizeListAndOpenNew(chatId, result.transition());
+            return;
+        }
+        editShoppingListMessage(createShoppingListEdit(chatId, messageId, result.snapshot(), true, null));
+    }
+
+    private void refreshActiveList(long chatId, String notice) {
+        ActiveListSnapshot activeList = shoppingListService.getActiveList(chatId);
+        if (activeList.messageId() != null) {
+            editShoppingListMessage(createShoppingListEdit(
+                    chatId,
+                    activeList.messageId(),
+                    activeList.snapshot(),
+                    true,
+                    notice
+            ));
+            return;
+        }
+
+        ListMessageKey key = new ListMessageKey(chatId, activeList.listId());
+        if (pendingListMessages.putIfAbsent(key, Boolean.TRUE) == null) {
+            sendActiveListMessage(
+                    chatId,
+                    activeList.listId(),
+                    activeList.snapshot(),
+                    createShoppingListMessage(chatId, activeList.snapshot(), true, notice)
+            );
         }
     }
 
-    private SendMessage showShoppingList(long chatId) {
-        return showShoppingList(chatId, null);
+    private void finalizeListAndOpenNew(long chatId, ListTransition transition) {
+        EditMessageText finalMessage = createShoppingListEdit(
+                chatId,
+                transition.previousMessageId(),
+                transition.previousSnapshot(),
+                false,
+                null
+        );
+        editShoppingListMessageThen(finalMessage, () -> refreshActiveList(chatId, null));
     }
 
-    private SendMessage showShoppingList(long chatId, String notice) {
-        ShoppingListView view = createShoppingListView(chatId);
-        String text = notice == null ? view.text() : notice + "\n\n" + view.text();
-
+    private SendMessage createShoppingListMessage(
+            long chatId,
+            ShoppingListSnapshot snapshot,
+            boolean interactive,
+            String notice
+    ) {
+        ShoppingListView view = createShoppingListView(snapshot, interactive);
         SendMessage message = new SendMessage();
         message.setChatId(String.valueOf(chatId));
-        message.setText(text);
+        message.setText(withNotice(view.text(), notice));
         message.setParseMode("HTML");
         message.setReplyMarkup(view.keyboard());
         return message;
     }
 
-    private EditMessageText createShoppingListEdit(long chatId, int messageId) {
-        ShoppingListView view = createShoppingListView(chatId);
-
+    private EditMessageText createShoppingListEdit(
+            long chatId,
+            int messageId,
+            ShoppingListSnapshot snapshot,
+            boolean interactive,
+            String notice
+    ) {
+        ShoppingListView view = createShoppingListView(snapshot, interactive);
         EditMessageText message = new EditMessageText();
         message.setChatId(String.valueOf(chatId));
         message.setMessageId(messageId);
-        message.setText(view.text());
+        message.setText(withNotice(view.text(), notice));
         message.setParseMode("HTML");
         message.setReplyMarkup(view.keyboard());
         return message;
     }
 
-    private ShoppingListView createShoppingListView(long chatId) {
-        ShoppingListSnapshot snapshot = shoppingListService.getSnapshot(chatId);
+    private ShoppingListView createShoppingListView(ShoppingListSnapshot snapshot, boolean interactive) {
         StringBuilder text = new StringBuilder("✅ <b>Купленные:</b>\n");
 
         if (snapshot.bought().isEmpty()) {
@@ -183,23 +235,69 @@ public class CartMasterProBot extends TelegramWebhookBot {
         text.append("\n🛒 <b>Надо купить:</b>\n");
         if (snapshot.toBuy().isEmpty()) {
             text.append("<i>пусто</i>\n");
+        } else if (!interactive) {
+            for (ShoppingListItem product : snapshot.toBuy()) {
+                text.append("• ")
+                        .append(escapeHtml(formatProductName(product.name())))
+                        .append('\n');
+            }
         }
 
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
-        for (ShoppingListItem product : snapshot.toBuy()) {
-            InlineKeyboardButton button = new InlineKeyboardButton(formatProductName(product.name()));
-            button.setCallbackData(product.id());
-            rows.add(Collections.singletonList(button));
-        }
+        if (interactive) {
+            for (ShoppingListItem product : snapshot.toBuy()) {
+                InlineKeyboardButton button = new InlineKeyboardButton(formatProductName(product.name()));
+                button.setCallbackData(product.id());
+                rows.add(Collections.singletonList(button));
+            }
 
-        InlineKeyboardButton clearButton = new InlineKeyboardButton("🗂️ Новый список");
-        clearButton.setCallbackData(CLEAR_CALLBACK);
-        rows.add(Collections.singletonList(clearButton));
+            InlineKeyboardButton newListButton = new InlineKeyboardButton("🗂️ Новый список");
+            newListButton.setCallbackData(NEW_LIST_CALLBACK);
+            rows.add(Collections.singletonList(newListButton));
+        }
 
         InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup();
         keyboard.setKeyboard(rows);
 
         return new ShoppingListView(text.toString(), keyboard);
+    }
+
+    private String withNotice(String listText, String notice) {
+        return notice == null ? listText : notice + "\n\n" + listText;
+    }
+
+    void sendActiveListMessage(
+            long chatId,
+            String listId,
+            ShoppingListSnapshot sentSnapshot,
+            SendMessage message
+    ) {
+        ListMessageKey key = new ListMessageKey(chatId, listId);
+        try {
+            executeAsync(message).whenComplete((sentMessage, exception) -> {
+                pendingListMessages.remove(key);
+                if (exception != null) {
+                    LOGGER.warn("Не удалось отправить сообщение со списком", exception);
+                    return;
+                }
+                if (sentMessage == null || sentMessage.getMessageId() == null) {
+                    LOGGER.warn("Telegram не вернул идентификатор сообщения со списком");
+                    return;
+                }
+
+                ActiveListSnapshot activeList = shoppingListService.registerActiveMessage(
+                        chatId,
+                        listId,
+                        sentMessage.getMessageId()
+                );
+                if (activeList != null && !activeList.snapshot().equals(sentSnapshot)) {
+                    refreshActiveList(chatId, null);
+                }
+            });
+        } catch (TelegramApiException exception) {
+            pendingListMessages.remove(key);
+            LOGGER.warn("Не удалось отправить сообщение со списком", exception);
+        }
     }
 
     void editShoppingListMessage(EditMessageText message) {
@@ -210,6 +308,20 @@ public class CartMasterProBot extends TelegramWebhookBot {
             });
         } catch (TelegramApiException exception) {
             LOGGER.warn("Не удалось отправить запрос на обновление списка", exception);
+        }
+    }
+
+    void editShoppingListMessageThen(EditMessageText message, Runnable afterEdit) {
+        try {
+            executeAsync(message).whenComplete((ignored, exception) -> {
+                if (exception != null) {
+                    LOGGER.warn("Не удалось завершить сообщение со списком", exception);
+                }
+                afterEdit.run();
+            });
+        } catch (TelegramApiException exception) {
+            LOGGER.warn("Не удалось завершить сообщение со списком", exception);
+            afterEdit.run();
         }
     }
 
@@ -229,14 +341,14 @@ public class CartMasterProBot extends TelegramWebhookBot {
         return "⚠️ Часть товаров не добавлена: " + String.join("; ", reasons) + ".";
     }
 
+    private String formatProductName(String name) {
+        return productIconResolver.decorate(truncateProductName(name));
+    }
+
     private String truncateProductName(String name) {
         return name.length() > MAX_PRODUCT_DISPLAY_LENGTH
                 ? name.substring(0, MAX_PRODUCT_DISPLAY_LENGTH) + "…"
                 : name;
-    }
-
-    private String formatProductName(String name) {
-        return productIconResolver.decorate(truncateProductName(name));
     }
 
     private String escapeHtml(String value) {
@@ -272,6 +384,9 @@ public class CartMasterProBot extends TelegramWebhookBot {
     }
 
     private record ShoppingListView(String text, InlineKeyboardMarkup keyboard) {
+    }
+
+    private record ListMessageKey(long chatId, String listId) {
     }
 
     @Override

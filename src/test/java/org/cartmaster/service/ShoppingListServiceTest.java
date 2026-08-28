@@ -66,17 +66,44 @@ class ShoppingListServiceTest {
     @Test
     void startsNewListWhenTheLastProductIsBought() {
         service.addProducts(1L, "Молоко, Хлеб");
+        ShoppingListService.ActiveListSnapshot activeList = service.getActiveList(1L);
+        service.registerActiveMessage(1L, activeList.listId(), 77);
         String firstProductId = service.getSnapshot(1L).toBuy().get(0).id();
 
-        assertThat(service.moveToBoughtAndResetWhenCompleted(1L, firstProductId)).isTrue();
+        ShoppingListService.MoveToBoughtResult firstResult = service.moveToBought(1L, 77, firstProductId);
+        assertThat(firstResult.moved()).isTrue();
+        assertThat(firstResult.startsNewList()).isFalse();
         assertThat(service.getSnapshot(1L).toBuy()).hasSize(1);
         assertThat(service.getSnapshot(1L).bought()).hasSize(1);
 
         String lastProductId = service.getSnapshot(1L).toBuy().get(0).id();
-        assertThat(service.moveToBoughtAndResetWhenCompleted(1L, lastProductId)).isTrue();
+        ShoppingListService.MoveToBoughtResult lastResult = service.moveToBought(1L, 77, lastProductId);
+
+        assertThat(lastResult.moved()).isTrue();
+        assertThat(lastResult.startsNewList()).isTrue();
+        assertThat(lastResult.transition().previousSnapshot().toBuy()).isEmpty();
+        assertThat(lastResult.transition().previousSnapshot().bought()).hasSize(2);
 
         assertThat(service.getSnapshot(1L).toBuy()).isEmpty();
         assertThat(service.getSnapshot(1L).bought()).isEmpty();
+    }
+
+    @Test
+    void startsANewListOnlyFromTheActiveListMessage() {
+        service.addProducts(1L, "Молоко");
+        ShoppingListService.ActiveListSnapshot activeList = service.getActiveList(1L);
+        service.registerActiveMessage(1L, activeList.listId(), 77);
+
+        ShoppingListService.ListTransition transition = service.startNewList(1L, 77);
+
+        assertThat(transition).isNotNull();
+        assertThat(transition.previousSnapshot().toBuy())
+                .extracting(ShoppingListService.ShoppingListItem::name)
+                .containsExactly("Молоко");
+        assertThat(service.getActiveList(1L).listId()).isNotEqualTo(activeList.listId());
+        assertThat(service.getActiveList(1L).messageId()).isNull();
+        assertThat(service.getSnapshot(1L).toBuy()).isEmpty();
+        assertThat(service.startNewList(1L, 77)).isNull();
     }
 
     @Test
