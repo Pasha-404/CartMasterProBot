@@ -21,12 +21,14 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -72,6 +74,27 @@ class CartMasterProBotTest {
         assertThat(buttonTexts(firstMessage.getValue())).contains("🥛 Молоко", "🗂️ Новый список");
         assertThat(buttonTexts(updatedMessage.getValue())).contains("🥛 Молоко", "🍞 Хлеб", "🗂️ Новый список");
         assertThat(shoppingListService.getActiveList(1L).messageId()).isEqualTo(77);
+    }
+
+    @Test
+    void deletesTheSourceMessageAfterAddingProducts() {
+        CartMasterProBot textBot = spy(bot);
+        blockListSending(textBot);
+
+        assertThat(textBot.onWebhookUpdateReceived(textUpdate(1L, 91, "Молоко, Хлеб"))).isNull();
+
+        verify(textBot).deleteIncomingProductMessage(1L, 91);
+    }
+
+    @Test
+    void keepsTheSourceMessageWhenNoProductWasAdded() {
+        CartMasterProBot textBot = spy(bot);
+        blockListSending(textBot);
+        String tooLongProduct = "а".repeat(ShoppingListService.MAX_PRODUCT_NAME_LENGTH + 1);
+
+        assertThat(textBot.onWebhookUpdateReceived(textUpdate(1L, 92, tooLongProduct))).isNull();
+
+        verify(textBot, never()).deleteIncomingProductMessage(anyLong(), anyInt());
     }
 
     @Test
@@ -210,6 +233,7 @@ class CartMasterProBotTest {
                 any(ShoppingListSnapshot.class),
                 any(SendMessage.class)
         );
+        doNothing().when(target).deleteIncomingProductMessage(anyLong(), anyInt());
     }
 
     private void runAfterFinalEdit(CartMasterProBot target) {
@@ -235,9 +259,14 @@ class CartMasterProBotTest {
     }
 
     private Update textUpdate(long chatId, String text) {
+        return textUpdate(chatId, 1, text);
+    }
+
+    private Update textUpdate(long chatId, int messageId, String text) {
         Message message = mock(Message.class);
         when(message.hasText()).thenReturn(true);
         when(message.getChatId()).thenReturn(chatId);
+        when(message.getMessageId()).thenReturn(messageId);
         when(message.getText()).thenReturn(text);
 
         Update update = mock(Update.class);

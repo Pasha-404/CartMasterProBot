@@ -15,9 +15,11 @@ import org.telegram.telegrambots.bots.TelegramWebhookBot;
 import org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery;
 import org.telegram.telegrambots.meta.api.methods.BotApiMethod;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
+import org.telegram.telegrambots.meta.api.methods.updatingmessages.DeleteMessage;
 import org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageText;
 import org.telegram.telegrambots.meta.api.objects.CallbackQuery;
 import org.telegram.telegrambots.meta.api.objects.MaybeInaccessibleMessage;
+import org.telegram.telegrambots.meta.api.objects.Message;
 import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
@@ -63,13 +65,13 @@ public class CartMasterProBot extends TelegramWebhookBot {
 
         try {
             if (update.hasMessage() && update.getMessage().hasText()) {
-                return handleTextMessage(update.getMessage().getChatId(), update.getMessage().getText());
+                return handleTextMessage(update.getMessage());
             }
             if (update.hasCallbackQuery()) {
                 return handleCallbackQuery(update.getCallbackQuery());
             }
             if (update.hasChannelPost() && update.getChannelPost().hasText()) {
-                return handleTextMessage(update.getChannelPost().getChatId(), update.getChannelPost().getText());
+                return handleTextMessage(update.getChannelPost());
             }
         } catch (RuntimeException exception) {
             LOGGER.error("Ошибка при обработке Telegram update", exception);
@@ -78,7 +80,9 @@ public class CartMasterProBot extends TelegramWebhookBot {
         return null;
     }
 
-    private BotApiMethod<?> handleTextMessage(long chatId, String text) {
+    private BotApiMethod<?> handleTextMessage(Message message) {
+        long chatId = message.getChatId();
+        String text = message.getText();
         String normalizedText = text == null ? "" : text.strip();
         if (normalizedText.startsWith("/")) {
             return handleCommand(chatId, normalizedText);
@@ -86,6 +90,9 @@ public class CartMasterProBot extends TelegramWebhookBot {
 
         AddProductsResult result = shoppingListService.addProducts(chatId, normalizedText);
         refreshActiveList(chatId, buildAddProductsNotice(result));
+        if (result.addedProducts() > 0 && message.getMessageId() != null) {
+            deleteIncomingProductMessage(chatId, message.getMessageId());
+        }
         return null;
     }
 
@@ -322,6 +329,20 @@ public class CartMasterProBot extends TelegramWebhookBot {
         } catch (TelegramApiException exception) {
             LOGGER.warn("Не удалось завершить сообщение со списком", exception);
             afterEdit.run();
+        }
+    }
+
+    void deleteIncomingProductMessage(long chatId, int messageId) {
+        DeleteMessage message = new DeleteMessage();
+        message.setChatId(chatId);
+        message.setMessageId(messageId);
+        try {
+            executeAsync(message).exceptionally(exception -> {
+                LOGGER.warn("Не удалось удалить обработанное сообщение с товаром", exception);
+                return null;
+            });
+        } catch (TelegramApiException exception) {
+            LOGGER.warn("Не удалось удалить обработанное сообщение с товаром", exception);
         }
     }
 
