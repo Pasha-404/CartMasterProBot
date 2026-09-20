@@ -129,14 +129,16 @@ class ShoppingListServiceTest {
     }
 
     @Test
-    void rejectsNamesThatExceedTheConfiguredLimit() {
-        String productName = "а".repeat(ShoppingListService.MAX_PRODUCT_NAME_LENGTH + 1);
+    void keepsLongProductNamesWithoutRejectingThem() {
+        String productName = "Сыр творожный с зеленью и чесноком упаковка 400 граммов";
 
         ShoppingListService.AddProductsResult result = service.addProducts(1L, productName);
 
-        assertThat(result.addedProducts()).isZero();
-        assertThat(result.rejectedTooLong()).isEqualTo(1);
-        assertThat(service.getSnapshot(1L).toBuy()).isEmpty();
+        assertThat(result.addedProducts()).isEqualTo(1);
+        assertThat(result.hasRejectedProducts()).isFalse();
+        assertThat(service.getSnapshot(1L).toBuy())
+                .extracting(ShoppingListService.ShoppingListItem::name)
+                .containsExactly(productName);
     }
 
     @Test

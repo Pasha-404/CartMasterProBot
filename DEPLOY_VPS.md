@@ -4,9 +4,11 @@
 
 ```bash
 git pull --ff-only
+git rev-parse HEAD # сверяется с commit, запустившим workflow
 mvn clean package
 sudo -n /usr/bin/systemctl restart cartmasterprobot.service
 /usr/bin/systemctl is-active --quiet cartmasterprobot.service
+curl --fail http://127.0.0.1:8081/health
 ```
 
 Последняя команда не требует sudo. Если сервис не запустится, workflow завершится с ошибкой.
@@ -73,7 +75,7 @@ cartmaster-deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart cartmasterprob
 2. Закоммитить и отправить их в `master`.
 3. Открыть вкладку `Actions` и дождаться успешного workflow `Deploy to VPS`.
 
-Успешный workflow означает, что тесты прошли, новый JAR собран на VPS, сервис перезапущен и находится в состоянии `active`.
+Успешный workflow означает, что проверенный commit совпал с commit на VPS, тесты прошли, новый JAR собран, сервис перезапущен, находится в состоянии `active` и отвечает на локальном `/health`.
 
 ## Диагностика
 

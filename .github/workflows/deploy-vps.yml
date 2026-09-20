@@ -22,7 +22,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Set up Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -86,10 +86,11 @@ jobs:
           )
 
           ssh "${ssh_options[@]}" "$VPS_USER@$VPS_HOST" \
-            bash -s -- "$APP_DIR" "$SYSTEMD_SERVICE" <<'REMOTE_SCRIPT'
+            bash -s -- "$APP_DIR" "$SYSTEMD_SERVICE" "$GITHUB_SHA" <<'REMOTE_SCRIPT'
           set -euo pipefail
           app_dir="$1"
           service_name="$2"
+          expected_sha="$3"
 
           case "$app_dir" in
             /*) ;;
@@ -101,7 +102,21 @@ jobs:
 
           cd "$app_dir"
           git pull --ff-only
+          deployed_sha="$(git rev-parse HEAD)"
+          if [ "$deployed_sha" != "$expected_sha" ]; then
+            echo "Expected $expected_sha, but VPS checked out $deployed_sha" >&2
+            exit 1
+          fi
           mvn clean package
           sudo -n /usr/bin/systemctl restart "$service_name"
-          /usr/bin/systemctl is-active --quiet "$service_name"
+          for attempt in $(seq 1 20); do
+            if /usr/bin/systemctl is-active --quiet "$service_name" \
+                && curl --fail --silent --show-error --max-time 2 http://127.0.0.1:8081/health > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "Service did not become ready within 20 seconds" >&2
+          exit 1
           REMOTE_SCRIPT

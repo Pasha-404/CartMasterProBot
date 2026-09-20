@@ -13,7 +13,6 @@ import java.util.concurrent.ConcurrentMap;
 @Service
 public class ShoppingListService {
 
-    public static final int MAX_PRODUCT_NAME_LENGTH = 30;
     public static final int MAX_PRODUCTS_PER_LIST = 20;
 
     private final ConcurrentMap<Long, ChatLists> listsByChat = new ConcurrentHashMap<>();
@@ -24,18 +23,8 @@ public class ShoppingListService {
 
     public AddProductsResult addProducts(long chatId, String input) {
         List<String> productNames = parseProductNames(input);
-        List<String> acceptedNames = new ArrayList<>();
-        int rejectedTooLong = 0;
-        for (String productName : productNames) {
-            if (productName.length() > MAX_PRODUCT_NAME_LENGTH) {
-                rejectedTooLong++;
-            } else {
-                acceptedNames.add(productName);
-            }
-        }
-
         ChatLists lists = getChatLists(chatId);
-        return lists.addProducts(acceptedNames, rejectedTooLong);
+        return lists.addProducts(productNames);
     }
 
     public boolean moveToBought(long chatId, String productId) {
@@ -61,6 +50,11 @@ public class ShoppingListService {
     public ActiveListSnapshot registerActiveMessage(long chatId, String listId, int messageId) {
         ChatLists lists = listsByChat.get(chatId);
         return lists == null ? null : lists.registerMessage(listId, messageId);
+    }
+
+    public ActiveListSnapshot invalidateActiveMessage(long chatId, String listId, int messageId) {
+        ChatLists lists = listsByChat.get(chatId);
+        return lists == null ? null : lists.invalidateMessage(listId, messageId);
     }
 
     public ShoppingListSnapshot getSnapshot(long chatId) {
@@ -94,12 +88,19 @@ public class ShoppingListService {
     }
 
     public record AddProductsResult(
-            int addedProducts,
-            int rejectedTooLong,
+            List<String> addedProductIds,
             int rejectedByListLimit
     ) {
+        public AddProductsResult {
+            addedProductIds = List.copyOf(addedProductIds);
+        }
+
+        public int addedProducts() {
+            return addedProductIds.size();
+        }
+
         public boolean hasRejectedProducts() {
-            return rejectedTooLong > 0 || rejectedByListLimit > 0;
+            return rejectedByListLimit > 0;
         }
     }
 
@@ -150,9 +151,12 @@ public class ShoppingListService {
         private UserLists activeLists = new UserLists();
         private Integer activeMessageId;
 
-        private synchronized AddProductsResult addProducts(List<String> names, int rejectedTooLong) {
-            int addedProducts = activeLists.addProducts(names);
-            return new AddProductsResult(addedProducts, rejectedTooLong, names.size() - addedProducts);
+        private synchronized AddProductsResult addProducts(List<String> names) {
+            List<ShoppingListItem> addedProducts = activeLists.addProducts(names);
+            return new AddProductsResult(
+                    addedProducts.stream().map(ShoppingListItem::id).toList(),
+                    names.size() - addedProducts.size()
+            );
         }
 
         private synchronized boolean moveToBought(String productId) {
@@ -201,6 +205,14 @@ public class ShoppingListService {
             return snapshot();
         }
 
+        private synchronized ActiveListSnapshot invalidateMessage(String listId, int messageId) {
+            if (!activeListId.equals(listId) || !isActiveMessage(messageId)) {
+                return null;
+            }
+            activeMessageId = null;
+            return snapshot();
+        }
+
         private boolean isActiveMessage(int messageId) {
             return activeMessageId != null && activeMessageId == messageId;
         }
@@ -214,14 +226,15 @@ public class ShoppingListService {
         private final List<ShoppingListItem> toBuy = new ArrayList<>();
         private final List<ShoppingListItem> bought = new ArrayList<>();
 
-        private int addProducts(List<String> names) {
+        private List<ShoppingListItem> addProducts(List<String> names) {
             int availableSlots = MAX_PRODUCTS_PER_LIST - toBuy.size() - bought.size();
             int productsToAdd = Math.max(0, Math.min(availableSlots, names.size()));
-            names.stream()
+            List<ShoppingListItem> addedProducts = names.stream()
                     .limit(productsToAdd)
                     .map(ShoppingListItem::create)
-                    .forEach(toBuy::add);
-            return productsToAdd;
+                    .toList();
+            toBuy.addAll(addedProducts);
+            return addedProducts;
         }
 
         private boolean moveToBought(String productId) {
