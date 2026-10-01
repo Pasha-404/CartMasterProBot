@@ -49,6 +49,7 @@ public class ProductIconResolver {
             new IconRule("🍆", List.of("баклажан")),
             new IconRule("🥔", List.of("картошк", "картофел")),
             new IconRule("🥕", List.of("морков")),
+            new IconRule("🫜", List.of("свекл", "свекол")),
             new IconRule("🥦", List.of("броккол")),
             new IconRule("🌽", List.of("кукуруз")),
             new IconRule("🍄", List.of("гриб")),

@@ -49,6 +49,13 @@ class ProductIconResolverTest {
     }
 
     @Test
+    void decoratesBeetNamesWithoutChangingUserText() {
+        assertThat(resolver.decorate("Свёкла")).isEqualTo("🫜 Свёкла");
+        assertThat(resolver.decorate("СВЕКЛА варёная")).isEqualTo("🫜 СВЕКЛА варёная");
+        assertThat(resolver.decorate("Свекольный салат")).isEqualTo("🫜 Свекольный салат");
+    }
+
+    @Test
     void preservesUnknownProductNamesExactly() {
         assertThat(resolver.decorate("Неизвестный товар № 7")).isEqualTo("Неизвестный товар № 7");
         assertThat(resolver.decorate("Масло подсолнечное")).isEqualTo("Масло подсолнечное");
